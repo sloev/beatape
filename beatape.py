@@ -9,9 +9,19 @@ Tracks and sends beat phase; detects missing beats based on average prior interv
 WebSockets Server to accept IR remote control commands. Forwards to serial port.
 '''
 
-import websocket
 import _thread
 import threading
+import time
+from pythonosc import udp_client
+from pythonosc import osc_bundle_builder
+from pythonosc import osc_message_builder
+client = udp_client.SimpleUDPClient('127.0.0.1', 12345)
+
+def ms_time():
+    return time.time() * 1000.0
+
+
+start = ms_time()
 
 import numpy as np
 from madmom.features.beats import DBNBeatTrackingProcessor, RNNBeatProcessor
@@ -21,19 +31,9 @@ from numpy_ringbuffer import RingBuffer
 import psutil, os
 import time
 from multiprocessing import Manager, Queue
-import serial
 import queue
 
-import tornado.httpserver
-import tornado.websocket
-import tornado.ioloop
-import tornado.web
-import tornado.platform.asyncio
-import socket
-import asyncio
 
-#ser = serial.Serial('com19', baudrate = 1000000, bytesize=serial.EIGHTBITS, parity=serial.PARITY_NONE, stopbits=serial.STOPBITS_ONE, timeout = 80000, xonxoff=0, dsrdtr=0)
-ser = serial.Serial("/dev/ttyS0", 1000000)
 
 TWOPI = 2*np.pi
 RADPERDEGREE = 45/np.pi
@@ -60,44 +60,6 @@ kwargs = dict(
     #verbose = 1
 )
 
-class WSHandler(tornado.websocket.WebSocketHandler):
-    def open(self):
-        print('new connection')
-      
-    def on_message(self, message):
-        print('IR command: {}'.format(message))
-        ser.write(message.encode())
-        temp = f"Temp: {get_cpu_temp():.2f}"
-        self.write_message(temp)
- 
-    def on_close(self):
-        print('connection closed')
- 
-    def check_origin(self, origin):
-        return True
- 
-application = tornado.web.Application([
-    (r'/ws', WSHandler),
-])
-
-def get_cpu_temp():
-    """
-    Obtains the current value of the CPU temperature.
-    :returns: Current value of the CPU temperature if successful, zero value otherwise.
-    :rtype: float
-    """
-    # Initialize the result.
-    result = 0.0
-    # The first line in this file holds the CPU temperature as an integer times 1000.
-    # Read the first line and remove the newline character at the end of the string.
-    with open('/sys/class/thermal/thermal_zone0/temp') as f:
-        line = f.readline().strip()
-    # Test if the string is an integer as expected.
-    if line.isdigit():
-        # Convert the string with the CPU temperature to a float in degrees Celsius.
-        result = float(line) / 1000
-    # Give the result back to the caller.
-    return result
 
 def bpm_to_ms_period(bpm):
     return 60000 / bpm
@@ -152,28 +114,25 @@ def beat_callback(beats, output=None):
                 beat_phase = (m + beat_phase) % 4;  # next phase please
                 beat_char = chr(ord('a') + beat_phase)
                 s = "T{}{:.0f}\r".format(beat_char, adjusted_interval)
-                ser.write(s.encode())
                 bpm = ms_period_to_bpm(adjusted_interval)
+                next_beat_ms = int(ms_time() + (bpm/60.0))
+                bundle = osc_bundle_builder.OscBundleBuilder(osc_bundle_builder.IMMEDIATELY)
+                msg = osc_message_builder.OscMessageBuilder(address='/beatape')
+                msg.add_arg(bpm, "f")
+                msg.add_arg(int(next_beat_ms))
+                bundle.add_content(msg.build())
+            
+                bundle = bundle.build()
+                client.send(bundle)
                 print("T{}{:.0f} ({:.0f})".format(beat_char, adjusted_interval, bpm))
         else:   # queue just filling
             into_my_q(interval, rxq)                    # add actually-received period to the queue           
         last_real_T_ms = this_real_T_ms
 
-def websocketIOloop():
-    http_server = tornado.httpserver.HTTPServer(application)
-    http_server.listen(8888)
-    myIP = socket.gethostbyname(socket.gethostname())
-    print('*** Websocket Server Started at {}***'.format(myIP))
-    tornado.ioloop.IOLoop.instance().start()
 
 if __name__ == '__main__':
-    print("Starting Beat4aBlast! v1.0")
-    print('Current CPU temperature is {:.2f} degrees Celsius.'.format(get_cpu_temp()))
-    asyncio.set_event_loop_policy(tornado.platform.asyncio.AnyThreadEventLoopPolicy())
-    x = threading.Thread(target=websocketIOloop,)
-    x.start()
+    start = ms_time()
 
-    ser.write("a\r".encode())   # indicate to Repeater we're starting up
 
     in_processor = RNNBeatProcessor(**kwargs)
     beat_processor = DBNBeatTrackingProcessor(**kwargs)

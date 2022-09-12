@@ -14,9 +14,9 @@ import sys
 
 import numpy as np
 
-from ..audio.signal import signal_frame, smooth as smooth_signal
-from ..ml.nn import average_predictions
-from ..processors import (OnlineProcessor, ParallelProcessor, Processor,
+from madmom.audio.signal import signal_frame, smooth as smooth_signal
+from madmom.ml.nn import average_predictions
+from madmom.processors import (OnlineProcessor, ParallelProcessor, Processor,
                           SequentialProcessor)
 
 
@@ -71,13 +71,13 @@ class RNNBeatProcessor(SequentialProcessor):
     def __init__(self, post_processor=average_predictions, online=False,
                  nn_files=None, **kwargs):
         # pylint: disable=unused-argument
-        from ..audio.signal import SignalProcessor, FramedSignalProcessor
-        from ..audio.stft import ShortTimeFourierTransformProcessor
-        from ..audio.spectrogram import (
+        from madmom.audio.signal import SignalProcessor, FramedSignalProcessor
+        from madmom.audio.stft import ShortTimeFourierTransformProcessor
+        from madmom.audio.spectrogram import (
             FilteredSpectrogramProcessor, LogarithmicSpectrogramProcessor,
             SpectrogramDifferenceProcessor)
-        from ..ml.nn import NeuralNetworkEnsemble
-        from ..models import BEATS_LSTM, BEATS_BLSTM
+        from madmom.ml.nn import NeuralNetworkEnsemble
+        from madmom.models import BEATS_LSTM, BEATS_BLSTM
         # choose the appropriate models and set frame sizes accordingly
         if online:
             if nn_files is None:
@@ -749,7 +749,7 @@ class CRFBeatDetectionProcessor(BeatTrackingProcessor):
 
         """
         # pylint: disable=arguments-differ
-        from ..utils import OverrideDefaultListAction
+        from madmom.utils import OverrideDefaultListAction
         # add CRF related arguments
         g = parser.add_argument_group('conditional random field arguments')
         g.add_argument('--interval_sigma', action='store', type=float,
@@ -889,7 +889,7 @@ class DBNBeatTrackingProcessor(OnlineProcessor):
         # pylint: disable=no-name-in-module
         from .beats_hmm import (BeatStateSpace, BeatTransitionModel,
                                 RNNBeatTrackingObservationModel)
-        from ..ml.hmm import HiddenMarkovModel
+        from madmom.ml.hmm import HiddenMarkovModel
         # convert timing information to construct a beat state space
         min_interval = 60. * fps / max_bpm
         max_interval = 60. * fps / min_bpm

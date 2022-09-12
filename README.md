@@ -1,24 +1,21 @@
-# synced-to-the-beat
-A raspberry pi/ESP32 project involving musical beat detection and stepper motors
+# beatape
 
-## ESP32s
-I used the 38-pin ESP32 development boards available from A-Z Delivery https://az-delivery.com/products/esp32-developmentboard or Amazon https://www.amazon.com/AZDelivery-Nodemcu-CP2102-Module-Development/dp/B07H3TTCCW/
+completely based on https://github.com/eyer1951/synced-to-the-beat
+but with a focus on portability and opensoundcontrol
 
-## Silent Step Stick
-This is the TMC2130 chip made by Trinamic. Info at https://www.trinamic.com/support/eval-kits/details/silentstepstick/. _Note that you need the SPI version of the development board. Non-SPI ones look similar but need a next-to-impossible modification to enable SPI._
 
-## PCB Parts List
-Frizting file is included. Parts list:
-- R1: 510 ohm
-- R2: 39 ohm  1W
-- C5: 1uf 25V
-- C6: 10uF 25V
-- C7: 10uF 25V
-- C8: 100nF
-- C9: 1uF
-- D2: 1N5817
+## requirements:
 
-- TMC2130 Silent Stepstick dev board
-- IRLB8721 N-Channel MOSFET
-- VS1838B IR Receiver
+```
+pip install -e git+https://github.com/CPJKU/madmom#egg=madmom
+pip install numpy
+pip install python-osc==1.8.0
+pip install numpy_ringbuffer==0.2.2
+```
 
+## tested on
+osx big sur
+
+## usage
+
+python beatape

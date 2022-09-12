@@ -26,7 +26,7 @@ from collections import MutableSequence
 import madmom
 import numpy as np
 
-from .utils import integer_types
+from madmom.utils import integer_types
 
 
 class Processor(object):
