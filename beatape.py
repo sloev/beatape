@@ -1,142 +1,255 @@
-#!/usr/bin/env python
-# encoding: utf-8
-''' 9/25/2020
-Beat4aBlast v1.0
-Based on madmom
-Sends averaged beat period out onboard tty port, 1Mbps
-Tracks and sends beat phase; detects missing beats based on average prior intervals
-    To allow receivers to synchronize for half-speed, or for motor direction sync
-WebSockets Server to accept IR remote control commands. Forwards to serial port.
-'''
+import asyncio
 
-import _thread
-import threading
-import time
-from pythonosc import udp_client
-from pythonosc import osc_bundle_builder
-from pythonosc import osc_message_builder
-client = udp_client.SimpleUDPClient('127.0.0.1', 12345)
-
-def ms_time():
-    return time.time() * 1000.0
-
-
-start = ms_time()
-
-import numpy as np
-from madmom.features.beats import DBNBeatTrackingProcessor, RNNBeatProcessor
-from madmom.models import BEATS_LSTM
-from madmom.processors import IOProcessor, process_online
-from numpy_ringbuffer import RingBuffer
-import psutil, os
-import time
-from multiprocessing import Manager, Queue
-import queue
-
-
-
-TWOPI = 2*np.pi
-RADPERDEGREE = 45/np.pi
-DAMP = 0.5
-MAX_BPM = 155
-MIN_BPM = 55
-
-# GLOBALS
-last_real_T_ms = 0
-beat_phase = 0;
-
-kwargs = dict(
-    fps = 100,
-    correct = True,
-    infile = None,
-    outfile = None,
-    max_bpm = MAX_BPM,
-    min_bpm = MIN_BPM,
-    nn_files = [BEATS_LSTM[1], ],  # , BEATS_LSTM[1]
-    num_frames = 1,
-    list_stream_input_device = 0,
-#    stream_input_device = 2,
-    online = True,
-    #verbose = 1
+from queue import Empty
+from time import perf_counter
+import toga
+import aioprocessing
+from toga.style.pack import COLUMN, ROW, Pack
+from beats import run
+from toga.constants import (
+    CENTER,
+    COLUMN,
+    GREEN,
+    ROW,
+    WHITE,
+    YELLOW,
+    BLUE,
+    RED,
+    TRANSPARENT,
+    GREY,
+    DARKSLATEGREY,
+    DARKKHAKI,
 )
 
 
-def bpm_to_ms_period(bpm):
-    return 60000 / bpm
-
-def ms_period_to_bpm(msp):
-    return 60000 / msp
-
-depth = 5
-rxq = queue.Queue(depth)  # queue of corrected-if-necessary timing of received beats
-max_period = bpm_to_ms_period(MIN_BPM)
-min_period = bpm_to_ms_period(MAX_BPM)
-
-def into_my_q(o, q):
-    global depth
-    if q.qsize() == depth:
-        q.get()  # dump one
-    q.put(o)
-
-def average_q(q):
-    sum = 0
-    items = 0
-    for elem in list(q.queue):
-        sum += elem
-        items += 1
-    if items == 0:
-        return 0
-    return sum / items
 
 
-def beat_callback(beats, output=None):
-    global last_real_T_ms, beat_phase
-    if len(beats) > 0:
-        b = beats[0]
-        this_real_T_ms = time.time() * 1000              # milliseconds since epoch
-        interval = (this_real_T_ms - last_real_T_ms)     # determine milliseconds since last beat
-        if interval > 3 * max_period:   # no beats for a while; clear the queue first to start over
-            for elem in list(rxq.queue):
-                rxq.get()  # dump each
-            last_real_T_ms = this_real_T_ms
-            return
+class App(toga.App):
+  
+    maxSteps = 32
 
-        if rxq.qsize() > 0:  # if we have at least one entry in the queue
-            if interval >= min_period and interval <= 3 * max_period:  # if this interval looks valid
-                ta = average_q(rxq)                  # average over all entries in the queue
-    # determine if we have skipped any beats
-                m = round(interval / ta);  # if = 1, no beat skipped; if = 2, one beat skipped, etc.
-                if (m < 1):
-                    m = 1;
-                adjusted_interval = interval / m;
-                into_my_q(adjusted_interval, rxq)                    # add actually-received period to the queue
+    outputNames = ["something", "something else", "something third"]*4
+    outputs = set()
+    stepLookup = [set() for i in range(maxSteps)]
+    oscNameFieldIndex = 1
+    currentStep = 0
+    currentHighlightedSteps=set()
+    metronome_next = perf_counter() + 2
+    metronome_prev = perf_counter()
 
-                beat_phase = (m + beat_phase) % 4;  # next phase please
-                beat_char = chr(ord('a') + beat_phase)
-                s = "T{}{:.0f}\r".format(beat_char, adjusted_interval)
-                bpm = ms_period_to_bpm(adjusted_interval)
-                next_beat_ms = int(ms_time() + (bpm/60.0))
-                bundle = osc_bundle_builder.OscBundleBuilder(osc_bundle_builder.IMMEDIATELY)
-                msg = osc_message_builder.OscMessageBuilder(address='/beatape')
-                msg.add_arg(bpm, "f")
-                msg.add_arg(int(next_beat_ms))
-                bundle.add_content(msg.build())
+    metronome_last_sync = perf_counter()
+    bpm_label = None
+    last_synced_label = None
+    metronome_task = None
+    queue = aioprocessing.AioQueue()
+    event = aioprocessing.AioEvent()
+
+    @property
+    def bpm(self):
+        return float(self.bpm_label.text)
+    
+    @bpm.setter
+    def bpm(self, bpm):
+        self.bpm_label.text = "{:.2f}".format(bpm)
+    
+    async def tick(self):
+        self.currentStep = (self.currentStep + 1) % self.maxSteps
+        await self.goToStep(self.currentStep)
+
+    async def goToStep(self, step):
+        for outputStep in self.currentHighlightedSteps:
+            outputStep.style.update(background_color = TRANSPARENT)
+
+        for output in self.outputs:
+            outputStep = output.children[self.oscNameFieldIndex+1+step]
+            self.currentHighlightedSteps.add(outputStep)
+            outputStep.style.update(background_color = DARKSLATEGREY)
+
+
+    def enableStep(self, widget):
+        _, step = widget.id.rsplit(".",1)
+
+        stepSet = self.stepLookup[int(step)]
+        if widget.value:
+            stepSet.add(widget.parent)
+        else:
+            stepSet.remove(widget.parent)
+
+
+
+    def deleteOscOutput(self, widget):
+        parent = widget.parent
+        for stepSet in self.stepLookup:
+            try:
+                stepSet.remove(parent)
+            except:pass
+        self.outputs.remove(parent)
+        for child in parent.children:
+            try:
+                self.currentHighlightedSteps.remove(child)
+            except:
+                pass
+        parent.parent.remove(parent)
+    
+    def set_bpm_now(self, widget=None):
+        self.setBpm(60)
+
+    def set_bpm_fast(self, widget=None):
+        self.setBpm(120)
+
+    def set_bpm_slow(self, widget=None):
+        self.setBpm(60)
+
+    def setBpm(self, bpm, offset=None):
+        self.bpm=bpm
+        self.metronome_next = perf_counter() + 60/self.bpm
+
+    async def metronome(self, widget):
+        while True:
+            t = perf_counter()
+
+            await asyncio.sleep(self.metronome_next-t)
+            t = perf_counter()
             
-                bundle = bundle.build()
-                client.send(bundle)
-                print("T{}{:.0f} ({:.0f})".format(beat_char, adjusted_interval, bpm))
-        else:   # queue just filling
-            into_my_q(interval, rxq)                    # add actually-received period to the queue           
-        last_real_T_ms = this_real_T_ms
+            delta = (t - self.metronome_next)*0.5
+            self.metronome_next = t + 60/self.bpm
+
+            await self.tick()
+
+    def startup(self):
+        # Set up main window
+        self.main_window = toga.MainWindow(title=self.name)
+
+        mainBox = toga.Box(style=Pack(direction=COLUMN, padding_top=2))
+
+        optionsBox = toga.Box(style=Pack(direction=ROW, padding_top=2))
+        bpm_fast_button = toga.Button('set_bpm to 120', on_press=self.set_bpm_fast)
+        bpm_slow_button = toga.Button('set_bpm to 60', on_press=self.set_bpm_slow)
+        optionsBox.add(bpm_fast_button)
+        optionsBox.add(bpm_slow_button)
+        
+        self.bpm_label = toga.Label('60')
+        self.bpm_label.style.width=50
+       
+        optionsBox.add(self.bpm_label)
+        mainBox.add(optionsBox)
+
+        stepsequencerBox = toga.Box(style=Pack(direction=COLUMN, padding_top=2))
+
+        ## labels start
+        labelBox = toga.Box(style=Pack(direction=ROW, padding_top=2))
+        label = toga.Label('')
+        label.style.height = 20
+        label.style.padding_right=4
+        label.style.width = 25
+        labelBox.add(label)
+
+        label = toga.Label('osc name')
+        label.style.height = 20
+        label.style.padding_right=4
+        label.style.width = 200
+        labelBox.add(label)
+
+        for step in range(0, self.maxSteps):
+            label = toga.Label('{:2d}'.format(step+1))
+            label.style.height = 20
+            label.style.width = 22
+            label.style.text_align = 'justify'
+
+            label.style.padding_right=2
+            if step >0 and step % 4 == 0:
+                label.style.padding_left=7
+            labelBox.add(label)
+        stepsequencerBox.add(labelBox)
+        # labels end
+
+        for outputOscName in self.outputNames:
+            outputBox = toga.Box(style=Pack(direction=ROW, padding_top=2))
+
+            button = toga.Button('❌', on_press=self.deleteOscOutput)
+            button.style.height = 15
+            button.style.width = 25
+            button.style.font_size = "7"
+            button.style.padding_right=4
+            outputBox.add(button)
+
+            oscName = toga.TextInput(id="%s.oscOutputName" %outputBox.id, value=outputOscName)
+            oscName.style.height = 20
+            oscName.style.width = 200
+            oscName.style.padding_right=4
+            outputBox.add(oscName)
+
+
+            for step in range(0, self.maxSteps):
+                
+
+                button = toga.Switch('', id="%s.%d" %(outputBox.id,step), on_change=self.enableStep)
+                # button.style.padding_top = 4
+                button.style.height =20
+                button.style.width = 15
+                button.style.padding_right=7
+                button.style.padding_left=2
+                if step >0 and step % 4 == 0:
+                    button.style.padding_left=9
+                button.style.alignment = 'center'
+                outputBox.add(button)
+            stepsequencerBox.add(outputBox)
+            self.outputs.add(outputBox)
+        
+        mainBox.add(stepsequencerBox)
+
+
+        # Add the content on the main window
+        self.main_window.content = mainBox
+        app.add_background_task(self.metronome)
+        app.add_background_task(self.bpm_receiver)
+        def exit_handler(widget):
+            print("exiting")
+            self.event.set()
+            if self.p.is_alive():
+                print("its alive")
+                self.p.join()
+            self.queue.close()
+
+            print("exited")
+            return True
+            
+        app.on_exit = exit_handler
+
+        self.set_bpm_now()
+       
+
+
+        # Show the main window
+        self.main_window.show()
+
+    async def bpm_receiver(self, widget):
+
+        self.p = aioprocessing.AioProcess(target=run, args=(app.queue,app.event))
+        self.p.start()
+
+        while self.p.is_alive():
+            try:
+                bpm = await self.queue.coro_get(timeout=1)
+            except Empty: 
+                continue
+            if bpm is None:
+                return
+            self.bpm = float(bpm)
+            self.metronome_next = perf_counter() + 60/self.bpm
+
+        print("process died")
+        return
+  
+
+
+
+def main():
+    app =  App('Handlers', 'org.beeware.handlers')
+   
+    return app
 
 
 if __name__ == '__main__':
-    start = ms_time()
-
-
-    in_processor = RNNBeatProcessor(**kwargs)
-    beat_processor = DBNBeatTrackingProcessor(**kwargs)
-    out_processor = [beat_processor, beat_callback]
-    processor = IOProcessor(in_processor, out_processor)
-    process_online(processor,  **kwargs)
-    
+    app = main()
+    app.main_loop()
