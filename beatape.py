@@ -346,18 +346,6 @@ class App(toga.App):
         self.settings.setdefault("osc",{})["host"] = self.osc_host
         self.settings.setdefault("osc",{})["port"] = self.osc_port
 
-        self.osc_client = None
-        self.oscConnectButton.style.background_color = TRANSPARENT
-        logging.warning("connecting to osc")
-        loop = asyncio.get_event_loop()
-        try:
-            _, self.osc_client = await loop.create_datagram_endpoint(
-                aiosc.OSCProtocol, remote_addr=(self.osc_host, int(self.osc_port))
-            )
-            self.oscConnectButton.style.background_color = GREEN
-        except:
-            logging.exception("error during osc setup")
-
     def loadSettingsFile(self, settingsFilePath):
         try:
             with open(settingsFilePath) as f:
@@ -402,11 +390,11 @@ class App(toga.App):
 
 
     async def send_osc_messages(self, *messages):
-        if self.osc_client is None:
-            logging.warning("not sending osc messages, since client is not initialized")
+        if not messages:
             return
+        futures = [            aiosc.send((self.osc_host, self.osc_port), pattern, value) for (pattern, value) in messages]
         await asyncio.gather(
-            self.osc_client.send(pattern, value) for (pattern, value) in messages
+            *futures, return_exceptions=True
         )
 
     async def bpm_receiver(self, widget):
@@ -414,18 +402,19 @@ class App(toga.App):
 
         bc = BeatCaller(q)
 
-        async for s in bc.async_iter():
-            bpm, next_beat_epoch = s.split(" ")
-            self.bpm = float(bpm)
-            self.metronome_next = float(next_beat_epoch) + (self.skew/1000.0)
-            await self.send_osc_messages(
-                ("/beatape/bpm", self.bpm),
-                (
-                    "/beatape/next_beat_epoch_ms",
-                    math.floor(self.metronome_next * 1000.0) * 1.0,
-                ),
-            )
-        return
+        while True:
+            async for s in bc.async_iter():
+                bpm, next_beat_epoch = s.split(" ")
+                self.bpm = float(bpm)
+                self.metronome_next = float(next_beat_epoch) + (self.skew/1000.0)
+                await self.send_osc_messages(
+                    ("/beatape/bpm", self.bpm),
+                    (
+                        "/beatape/next_beat_epoch_ms",
+                        math.floor(self.metronome_next * 1000.0) * 1.0,
+                    ),
+                )
+            
 
 
 def main():
